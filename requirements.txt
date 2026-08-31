@@ -1,5 +1,5 @@
 Django
-sentence-transformers
+djangorestframework
 scikit-learn
 scipy
 pandas
@@ -7,4 +7,5 @@ numpy
 Pillow
 PyMuPDF
 gunicorn
-djangorestframework
+sentence-transformers[onnx]
+onnxruntime
