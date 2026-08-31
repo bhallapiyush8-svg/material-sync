@@ -1,0 +1,9 @@
+Django
+sentence-transformers
+scikit-learn
+scipy
+pandas
+numpy
+Pillow
+PyMuPDF
+gunicorn
