@@ -1,3 +1,15 @@
+# =========================================================
+# RENDER HEALTH CHECK
+# =========================================================
+
+def health_check(request):
+    """Lightweight endpoint used by Render to verify the app is alive."""
+    return JsonResponse({
+        "status": "ok",
+        "service": "MaterialSync",
+    })
+
+
 import io
 import json
 import os
