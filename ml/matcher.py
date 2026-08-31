@@ -1,0 +1,1499 @@
+from typing import Any, Dict, List
+
+from sentence_transformers import SentenceTransformer, util
+
+from .extract_attributes import extract_attributes
+
+
+# =========================================================
+# MODEL CONFIGURATION
+# =========================================================
+
+MODEL_NAME = "all-MiniLM-L6-v2"
+
+# IMPORTANT:
+# Do not load the embedding model when Django imports this file.
+# It will be loaded only when semantic_similarity() is called.
+_model = None
+
+
+def get_model() -> SentenceTransformer:
+    """
+    Lazily load the Sentence Transformer model.
+
+    This prevents Django startup, URL checks, admin pages,
+    and other commands from loading the ML model unnecessarily.
+    """
+
+    global _model
+
+    if _model is None:
+
+        _model = SentenceTransformer(
+            MODEL_NAME
+        )
+
+    return _model
+
+
+# =========================================================
+# NUMERIC / VALUE COMPARISON
+# =========================================================
+
+def values_are_equal(
+    value_a: Any,
+    value_b: Any,
+    tolerance: float = 0.0,
+) -> bool:
+    """
+    Compare two values.
+
+    Numeric values use a tolerance.
+    Strings are compared after normalization.
+    """
+
+    if value_a is None or value_b is None:
+        return False
+
+
+    if isinstance(
+        value_a,
+        (int, float),
+    ) and isinstance(
+        value_b,
+        (int, float),
+    ):
+
+        return abs(
+            value_a - value_b
+        ) <= tolerance
+
+
+    if isinstance(
+        value_a,
+        str,
+    ) and isinstance(
+        value_b,
+        str,
+    ):
+
+        normalized_a = (
+            value_a
+            .strip()
+            .upper()
+        )
+
+        normalized_b = (
+            value_b
+            .strip()
+            .upper()
+        )
+
+        return normalized_a == normalized_b
+
+
+    return value_a == value_b
+
+
+# =========================================================
+# ATTRIBUTE VALUE DISPLAY
+# =========================================================
+
+def display_value(
+    value: Any,
+) -> str:
+
+    if value is None:
+
+        return "—"
+
+
+    if isinstance(
+        value,
+        float,
+    ):
+
+        if value.is_integer():
+
+            return str(
+                int(value)
+            )
+
+        return f"{value:.2f}"
+
+
+    return str(value)
+
+
+# =========================================================
+# ATTRIBUTE FIELD CONFIGURATION
+# =========================================================
+
+def get_category_fields(
+    category: str,
+):
+    """
+    Return important engineering fields for
+    each supported material category.
+
+    Tuple format:
+
+        (
+            field_name,
+            numeric_tolerance
+        )
+    """
+
+    categories = {
+
+        "BOLT": [
+            ("material", 0.0),
+            ("diameter_mm", 0.5),
+            ("length_mm", 0.5),
+        ],
+
+        "BALL_VALVE": [
+            ("material", 0.0),
+            ("size_mm", 1.0),
+            ("pressure_rating_psi", 0.0),
+            ("connection_type", 0.0),
+        ],
+
+        "BEARING": [
+            ("bearing_number", 0.0),
+            ("seal_type", 0.0),
+            ("bearing_type", 0.0),
+            ("material", 0.0),
+        ],
+
+        "PIPE": [
+            ("material", 0.0),
+            ("diameter_mm", 1.0),
+            ("wall_thickness_mm", 0.2),
+            ("pipe_type", 0.0),
+        ],
+    }
+
+
+    return categories.get(
+        category,
+        [],
+    )
+
+
+# =========================================================
+# CATEGORY RESOLUTION
+# =========================================================
+
+def resolve_category(
+    attrs_a: Dict[str, Any],
+    attrs_b: Dict[str, Any],
+) -> str:
+
+    category_a = attrs_a.get(
+        "category",
+        "UNKNOWN",
+    )
+
+    category_b = attrs_b.get(
+        "category",
+        "UNKNOWN",
+    )
+
+
+    if category_a != "UNKNOWN":
+
+        return category_a
+
+
+    if category_b != "UNKNOWN":
+
+        return category_b
+
+
+    return "UNKNOWN"
+
+
+# =========================================================
+# CATEGORY COMPATIBILITY
+# =========================================================
+
+def categories_are_compatible(
+    attrs_a: Dict[str, Any],
+    attrs_b: Dict[str, Any],
+) -> bool:
+
+    category_a = attrs_a.get(
+        "category",
+        "UNKNOWN",
+    )
+
+    category_b = attrs_b.get(
+        "category",
+        "UNKNOWN",
+    )
+
+
+    if (
+        category_a == "UNKNOWN"
+        or category_b == "UNKNOWN"
+    ):
+
+        return True
+
+
+    return category_a == category_b
+
+
+# =========================================================
+# ATTRIBUTE-LEVEL EXPLANATION
+# =========================================================
+
+def build_attribute_explanation(
+    attrs_a: Dict[str, Any],
+    attrs_b: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """
+    Produce an explainable comparison for every
+    relevant engineering attribute.
+
+    Each row contains:
+
+        name
+        value_a
+        value_b
+        status
+        score
+        importance
+        reason
+    """
+
+    category_a = attrs_a.get(
+        "category",
+        "UNKNOWN",
+    )
+
+    category_b = attrs_b.get(
+        "category",
+        "UNKNOWN",
+    )
+
+
+    if (
+        category_a != "UNKNOWN"
+        and category_b != "UNKNOWN"
+        and category_a != category_b
+    ):
+
+        return [
+            {
+                "name": "category",
+
+                "value_a":
+                    display_value(
+                        category_a
+                    ),
+
+                "value_b":
+                    display_value(
+                        category_b
+                    ),
+
+                "status":
+                    "CONFLICT",
+
+                "score":
+                    0.0,
+
+                "importance":
+                    "CRITICAL",
+
+                "reason":
+                    "The material categories are different.",
+            }
+        ]
+
+
+    category = resolve_category(
+        attrs_a,
+        attrs_b,
+    )
+
+
+    fields = get_category_fields(
+        category
+    )
+
+
+    explanation = []
+
+
+    for field, tolerance in fields:
+
+        value_a = attrs_a.get(
+            field
+        )
+
+        value_b = attrs_b.get(
+            field
+        )
+
+
+        # -------------------------------------------------
+        # Neither side contains the field.
+        # -------------------------------------------------
+
+        if (
+            value_a is None
+            and value_b is None
+        ):
+
+            continue
+
+
+        # -------------------------------------------------
+        # Missing from A
+        # -------------------------------------------------
+
+        if (
+            value_a is None
+            and value_b is not None
+        ):
+
+            explanation.append(
+                {
+                    "name":
+                        field,
+
+                    "value_a":
+                        "—",
+
+                    "value_b":
+                        display_value(
+                            value_b
+                        ),
+
+                    "status":
+                        "MISSING_A",
+
+                    "score":
+                        0.0,
+
+                    "importance":
+                        "REVIEW",
+
+                    "reason":
+                        f"{field} is present in Material B "
+                        "but not Material A.",
+                }
+            )
+
+            continue
+
+
+        # -------------------------------------------------
+        # Missing from B
+        # -------------------------------------------------
+
+        if (
+            value_a is not None
+            and value_b is None
+        ):
+
+            explanation.append(
+                {
+                    "name":
+                        field,
+
+                    "value_a":
+                        display_value(
+                            value_a
+                        ),
+
+                    "value_b":
+                        "—",
+
+                    "status":
+                        "MISSING_B",
+
+                    "score":
+                        0.0,
+
+                    "importance":
+                        "REVIEW",
+
+                    "reason":
+                        f"{field} is present in Material A "
+                        "but not Material B.",
+                }
+            )
+
+            continue
+
+
+        # -------------------------------------------------
+        # Both values exist
+        # -------------------------------------------------
+
+        matched = values_are_equal(
+            value_a,
+            value_b,
+            tolerance,
+        )
+
+
+        if matched:
+
+            explanation.append(
+                {
+                    "name":
+                        field,
+
+                    "value_a":
+                        display_value(
+                            value_a
+                        ),
+
+                    "value_b":
+                        display_value(
+                            value_b
+                        ),
+
+                    "status":
+                        "MATCHED",
+
+                    "score":
+                        1.0,
+
+                    "importance":
+                        "NORMAL",
+
+                    "reason":
+                        f"{field} agrees within "
+                        f"the allowed tolerance.",
+                }
+            )
+
+        else:
+
+            explanation.append(
+                {
+                    "name":
+                        field,
+
+                    "value_a":
+                        display_value(
+                            value_a
+                        ),
+
+                    "value_b":
+                        display_value(
+                            value_b
+                        ),
+
+                    "status":
+                        "CONFLICT",
+
+                    "score":
+                        0.0,
+
+                    "importance":
+                        "CRITICAL",
+
+                    "reason":
+                        f"{field} does not agree "
+                        f"within the allowed tolerance.",
+                }
+            )
+
+
+    return explanation
+
+
+# =========================================================
+# ATTRIBUTE SIMILARITY
+# =========================================================
+
+def attribute_similarity(
+    attrs_a: Dict[str, Any],
+    attrs_b: Dict[str, Any],
+) -> float:
+
+    if not categories_are_compatible(
+        attrs_a,
+        attrs_b,
+    ):
+
+        return 0.0
+
+
+    category = resolve_category(
+        attrs_a,
+        attrs_b,
+    )
+
+
+    fields = get_category_fields(
+        category
+    )
+
+
+    if not fields:
+
+        return 0.0
+
+
+    matched = 0.0
+
+    available = 0.0
+
+
+    for field, tolerance in fields:
+
+        value_a = attrs_a.get(
+            field
+        )
+
+        value_b = attrs_b.get(
+            field
+        )
+
+
+        # Ignore fields completely absent from
+        # both descriptions.
+
+        if (
+            value_a is None
+            and value_b is None
+        ):
+
+            continue
+
+
+        available += 1.0
+
+
+        if values_are_equal(
+            value_a,
+            value_b,
+            tolerance,
+        ):
+
+            matched += 1.0
+
+
+    if available == 0:
+
+        return 0.0
+
+
+    return matched / available
+
+
+# =========================================================
+# SEMANTIC SIMILARITY
+# =========================================================
+
+def semantic_similarity(
+    text_a: str,
+    text_b: str,
+) -> float:
+
+    model = get_model()
+
+
+    embeddings = model.encode(
+        [
+            text_a,
+            text_b,
+        ],
+        convert_to_tensor=True,
+    )
+
+
+    score = util.cos_sim(
+        embeddings[0],
+        embeddings[1],
+    ).item()
+
+
+    return max(
+        0.0,
+        min(
+            1.0,
+            score,
+        ),
+    )
+
+
+# =========================================================
+# CRITICAL MISMATCH
+# =========================================================
+
+def critical_mismatch(
+    attrs_a: Dict[str, Any],
+    attrs_b: Dict[str, Any],
+) -> bool:
+
+    category_a = attrs_a.get(
+        "category",
+        "UNKNOWN",
+    )
+
+    category_b = attrs_b.get(
+        "category",
+        "UNKNOWN",
+    )
+
+
+    # -----------------------------------------------------
+    # Category mismatch
+    # -----------------------------------------------------
+
+    if (
+        category_a != "UNKNOWN"
+        and category_b != "UNKNOWN"
+        and category_a != category_b
+    ):
+
+        return True
+
+
+    category = resolve_category(
+        attrs_a,
+        attrs_b,
+    )
+
+
+    # -----------------------------------------------------
+    # BOLT
+    # -----------------------------------------------------
+
+    if category == "BOLT":
+
+        material_a = attrs_a.get(
+            "material"
+        )
+
+        material_b = attrs_b.get(
+            "material"
+        )
+
+
+        if (
+            material_a is not None
+            and material_b is not None
+            and material_a != material_b
+        ):
+
+            return True
+
+
+        diameter_a = attrs_a.get(
+            "diameter_mm"
+        )
+
+        diameter_b = attrs_b.get(
+            "diameter_mm"
+        )
+
+
+        if (
+            diameter_a is not None
+            and diameter_b is not None
+            and abs(
+                diameter_a
+                - diameter_b
+            ) > 0.5
+        ):
+
+            return True
+
+
+        length_a = attrs_a.get(
+            "length_mm"
+        )
+
+        length_b = attrs_b.get(
+            "length_mm"
+        )
+
+
+        if (
+            length_a is not None
+            and length_b is not None
+            and abs(
+                length_a
+                - length_b
+            ) > 0.5
+        ):
+
+            return True
+
+
+    # -----------------------------------------------------
+    # BALL VALVE
+    # -----------------------------------------------------
+
+    elif category == "BALL_VALVE":
+
+        material_a = attrs_a.get(
+            "material"
+        )
+
+        material_b = attrs_b.get(
+            "material"
+        )
+
+
+        if (
+            material_a is not None
+            and material_b is not None
+            and material_a != material_b
+        ):
+
+            return True
+
+
+        size_a = attrs_a.get(
+            "size_mm"
+        )
+
+        size_b = attrs_b.get(
+            "size_mm"
+        )
+
+
+        if (
+            size_a is not None
+            and size_b is not None
+            and abs(
+                size_a
+                - size_b
+            ) > 1.0
+        ):
+
+            return True
+
+
+        pressure_a = attrs_a.get(
+            "pressure_rating_psi"
+        )
+
+        pressure_b = attrs_b.get(
+            "pressure_rating_psi"
+        )
+
+
+        if (
+            pressure_a is not None
+            and pressure_b is not None
+            and pressure_a != pressure_b
+        ):
+
+            return True
+
+
+        connection_a = attrs_a.get(
+            "connection_type"
+        )
+
+        connection_b = attrs_b.get(
+            "connection_type"
+        )
+
+
+        if (
+            connection_a is not None
+            and connection_b is not None
+            and connection_a != connection_b
+        ):
+
+            return True
+
+
+    # -----------------------------------------------------
+    # BEARING
+    # -----------------------------------------------------
+
+    elif category == "BEARING":
+
+        number_a = attrs_a.get(
+            "bearing_number"
+        )
+
+        number_b = attrs_b.get(
+            "bearing_number"
+        )
+
+
+        if (
+            number_a is not None
+            and number_b is not None
+            and number_a != number_b
+        ):
+
+            return True
+
+
+        seal_a = attrs_a.get(
+            "seal_type"
+        )
+
+        seal_b = attrs_b.get(
+            "seal_type"
+        )
+
+
+        if (
+            seal_a is not None
+            and seal_b is not None
+            and seal_a != seal_b
+        ):
+
+            return True
+
+
+        bearing_type_a = attrs_a.get(
+            "bearing_type"
+        )
+
+        bearing_type_b = attrs_b.get(
+            "bearing_type"
+        )
+
+
+        if (
+            bearing_type_a is not None
+            and bearing_type_b is not None
+            and bearing_type_a != bearing_type_b
+        ):
+
+            return True
+
+
+    # -----------------------------------------------------
+    # PIPE
+    # -----------------------------------------------------
+
+    elif category == "PIPE":
+
+        material_a = attrs_a.get(
+            "material"
+        )
+
+        material_b = attrs_b.get(
+            "material"
+        )
+
+
+        if (
+            material_a is not None
+            and material_b is not None
+            and material_a != material_b
+        ):
+
+            return True
+
+
+        diameter_a = attrs_a.get(
+            "diameter_mm"
+        )
+
+        diameter_b = attrs_b.get(
+            "diameter_mm"
+        )
+
+
+        if (
+            diameter_a is not None
+            and diameter_b is not None
+            and abs(
+                diameter_a
+                - diameter_b
+            ) > 1.0
+        ):
+
+            return True
+
+
+        thickness_a = attrs_a.get(
+            "wall_thickness_mm"
+        )
+
+        thickness_b = attrs_b.get(
+            "wall_thickness_mm"
+        )
+
+
+        if (
+            thickness_a is not None
+            and thickness_b is not None
+            and abs(
+                thickness_a
+                - thickness_b
+            ) > 0.2
+        ):
+
+            return True
+
+
+        pipe_a = attrs_a.get(
+            "pipe_type"
+        )
+
+        pipe_b = attrs_b.get(
+            "pipe_type"
+        )
+
+
+        if (
+            pipe_a is not None
+            and pipe_b is not None
+            and pipe_a != pipe_b
+        ):
+
+            return True
+
+
+    return False
+
+
+# =========================================================
+# EXPLANATION SUMMARY
+# =========================================================
+
+def build_explanation_summary(
+    attribute_rows: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+
+    matched = [
+        row
+        for row in attribute_rows
+        if row["status"] == "MATCHED"
+    ]
+
+
+    conflicts = [
+        row
+        for row in attribute_rows
+        if row["status"] == "CONFLICT"
+    ]
+
+
+    missing_a = [
+        row
+        for row in attribute_rows
+        if row["status"] == "MISSING_A"
+    ]
+
+
+    missing_b = [
+        row
+        for row in attribute_rows
+        if row["status"] == "MISSING_B"
+    ]
+
+
+    total = len(
+        attribute_rows
+    )
+
+
+    matched_count = len(
+        matched
+    )
+
+
+    if total:
+
+        agreement = (
+            matched_count
+            /
+            total
+        )
+
+    else:
+
+        agreement = 0.0
+
+
+    return {
+
+        "matched_count":
+            matched_count,
+
+        "conflict_count":
+            len(conflicts),
+
+        "missing_a_count":
+            len(missing_a),
+
+        "missing_b_count":
+            len(missing_b),
+
+        "total_attributes":
+            total,
+
+        "attribute_agreement":
+            round(
+                agreement,
+                4,
+            ),
+
+        "matched":
+            matched,
+
+        "conflicts":
+            conflicts,
+
+        "missing_a":
+            missing_a,
+
+        "missing_b":
+            missing_b,
+
+    }
+
+
+# =========================================================
+# MAIN MATERIAL COMPARISON
+# =========================================================
+
+def compare_materials(
+    text_a: str,
+    text_b: str,
+) -> Dict[str, Any]:
+
+    # -----------------------------------------------------
+    # Clean user input
+    # -----------------------------------------------------
+
+    text_a = (
+        text_a
+        .strip()
+    )
+
+    text_b = (
+        text_b
+        .strip()
+    )
+
+
+    # -----------------------------------------------------
+    # Extract engineering attributes
+    # -----------------------------------------------------
+
+    attrs_a = extract_attributes(
+        text_a
+    )
+
+    attrs_b = extract_attributes(
+        text_b
+    )
+
+
+    # -----------------------------------------------------
+    # Semantic score
+    # -----------------------------------------------------
+
+    semantic_score = semantic_similarity(
+        text_a,
+        text_b,
+    )
+
+
+    # -----------------------------------------------------
+    # Attribute score
+    # -----------------------------------------------------
+
+    attr_score = attribute_similarity(
+        attrs_a,
+        attrs_b,
+    )
+
+
+    # -----------------------------------------------------
+    # Detailed attribute explanation
+    # -----------------------------------------------------
+
+    attribute_rows = (
+        build_attribute_explanation(
+            attrs_a,
+            attrs_b,
+        )
+    )
+
+
+    explanation_summary = (
+        build_explanation_summary(
+            attribute_rows
+        )
+    )
+
+
+    # -----------------------------------------------------
+    # Existing weighted scoring model
+    # -----------------------------------------------------
+
+    final_score = (
+        semantic_score * 0.40
+        +
+        attr_score * 0.60
+    )
+
+
+    # -----------------------------------------------------
+    # Critical engineering mismatch
+    # -----------------------------------------------------
+
+    is_critical_mismatch = (
+        critical_mismatch(
+            attrs_a,
+            attrs_b,
+        )
+    )
+
+
+    # -----------------------------------------------------
+    # Critical mismatch must override similarity.
+    # -----------------------------------------------------
+
+    if is_critical_mismatch:
+
+        final_score = min(
+            final_score,
+            0.60,
+        )
+
+
+    # -----------------------------------------------------
+    # Classification
+    # -----------------------------------------------------
+
+    if is_critical_mismatch:
+
+        classification = (
+            "DIFFERENT"
+        )
+
+    elif final_score >= 0.90:
+
+        classification = (
+            "IDENTICAL"
+        )
+
+    elif final_score >= 0.75:
+
+        classification = (
+            "EQUIVALENT"
+        )
+
+    elif final_score >= 0.55:
+
+        classification = (
+            "NEAR_DUPLICATE"
+        )
+
+    else:
+
+        classification = (
+            "DIFFERENT"
+        )
+
+
+    # -----------------------------------------------------
+    # Human-readable explanation
+    # -----------------------------------------------------
+
+    explanation_text = []
+
+
+    if explanation_summary[
+        "matched_count"
+    ]:
+
+        explanation_text.append(
+            (
+                f"{explanation_summary['matched_count']} "
+                "engineering attribute(s) matched."
+            )
+        )
+
+
+    if explanation_summary[
+        "conflict_count"
+    ]:
+
+        explanation_text.append(
+            (
+                f"{explanation_summary['conflict_count']} "
+                "engineering attribute(s) conflict."
+            )
+        )
+
+
+    if explanation_summary[
+        "missing_a_count"
+    ]:
+
+        explanation_text.append(
+            (
+                f"{explanation_summary['missing_a_count']} "
+                "attribute(s) are missing from Material A."
+            )
+        )
+
+
+    if explanation_summary[
+        "missing_b_count"
+    ]:
+
+        explanation_text.append(
+            (
+                f"{explanation_summary['missing_b_count']} "
+                "attribute(s) are missing from Material B."
+            )
+        )
+
+
+    if is_critical_mismatch:
+
+        explanation_text.append(
+            (
+                "A critical engineering mismatch "
+                "prevents high-confidence consolidation."
+            )
+        )
+
+
+    if not explanation_text:
+
+        explanation_text.append(
+            "No structured engineering evidence was available."
+        )
+
+
+    return {
+
+        "text_a":
+            text_a,
+
+        "text_b":
+            text_b,
+
+        "attributes_a":
+            attrs_a,
+
+        "attributes_b":
+            attrs_b,
+
+        "semantic_score":
+            round(
+                semantic_score,
+                4,
+            ),
+
+        "attribute_score":
+            round(
+                attr_score,
+                4,
+            ),
+
+        "final_score":
+            round(
+                final_score,
+                4,
+            ),
+
+        "critical_mismatch":
+            is_critical_mismatch,
+
+        "classification":
+            classification,
+
+        # ---------------------------------------------
+        # NEW EXPLAINABILITY DATA
+        # ---------------------------------------------
+
+        "attribute_explanation":
+            attribute_rows,
+
+        "explanation_summary":
+            explanation_summary,
+
+        "explanation_text":
+            explanation_text,
+
+    }
+
+
+# =========================================================
+# PRETTY PRINTING
+# =========================================================
+
+def print_result(
+    result: Dict[str, Any],
+) -> None:
+
+    print(
+        "\n"
+        + "=" * 70
+    )
+
+
+    print(
+        "\nMATERIAL A:"
+    )
+
+    print(
+        result["text_a"]
+    )
+
+
+    print(
+        "\nATTRIBUTES A:"
+    )
+
+    print(
+        result["attributes_a"]
+    )
+
+
+    print(
+        "\nMATERIAL B:"
+    )
+
+    print(
+        result["text_b"]
+    )
+
+
+    print(
+        "\nATTRIBUTES B:"
+    )
+
+    print(
+        result["attributes_b"]
+    )
+
+
+    print(
+        "\nATTRIBUTE EXPLANATION:"
+    )
+
+
+    for row in result[
+        "attribute_explanation"
+    ]:
+
+        print(
+            f"  {row['name']}: "
+            f"{row['status']} "
+            f"({row['score']:.0%}) "
+            f"[A={row['value_a']} | "
+            f"B={row['value_b']}]"
+        )
+
+
+    print(
+        "\nSemantic Score    : "
+        f"{result['semantic_score']:.2%}"
+    )
+
+
+    print(
+        "Attribute Score   : "
+        f"{result['attribute_score']:.2%}"
+    )
+
+
+    print(
+        "Final Score       : "
+        f"{result['final_score']:.2%}"
+    )
+
+
+    print(
+        "Critical Mismatch : "
+        f"{result['critical_mismatch']}"
+    )
+
+
+    print(
+        "Classification     : "
+        f"{result['classification']}"
+    )
+
+
+    print(
+        "\nExplanation:"
+    )
+
+
+    for line in result[
+        "explanation_text"
+    ]:
+
+        print(
+            f"  - {line}"
+        )
+
+
+# =========================================================
+# TEST CASES
+# =========================================================
+
+if __name__ == "__main__":
+
+    examples = [
+
+        # Same bolt
+        (
+            "HEX BOLT M10 X 50 SS304",
+            "SS 304 HEXAGONAL BOLT 10MM X 50MM",
+        ),
+
+        # Different bolt material
+        (
+            "HEX BOLT M10 X 50 SS304",
+            "HEX BOLT M10 X 50 SS316",
+        ),
+
+        # Same valve
+        (
+            "SS316 FLANGED BALL VALVE 2 INCH 150 PSI",
+            "2 IN FLG BALL VALVE SS316 150 PSI",
+        ),
+
+        # Equivalent valve representation
+        (
+            "SS316 FLANGED BALL VALVE 2 INCH 150 PSI",
+            "BALL VALVE 50MM FLANGED SS316 150 PSI",
+        ),
+
+        # Different pipe material
+        (
+            "SEAMLESS PIPE SS304 50MM X 3MM",
+            "SEAMLESS SS316 PIPE 50MM X 3MM",
+        ),
+
+        # Different bearing number
+        (
+            "BEARING 6205 ZZ",
+            "BEARING 6206 ZZ",
+        ),
+
+    ]
+
+
+    for text_a, text_b in examples:
+
+        result = compare_materials(
+            text_a,
+            text_b,
+        )
+
+        print_result(
+            result
+        )
