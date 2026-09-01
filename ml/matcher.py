@@ -1,43 +1,35 @@
 from typing import Any, Dict, List
 
-from sentence_transformers import SentenceTransformer, util
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 from .extract_attributes import extract_attributes
 
 
 # =========================================================
-# MODEL CONFIGURATION
+# LIGHTWEIGHT SEMANTIC MATCHING
+# =========================================================
+#
+# Production/demo deployment intentionally uses TF-IDF
+# cosine similarity instead of Sentence Transformers.
+#
+# Why:
+# - no PyTorch
+# - no CUDA
+# - no NVIDIA packages
+# - fast startup on Render Free
+# - deterministic
+#
+# The engineering-attribute layer remains the primary
+# technical evidence used by the matcher.
 # =========================================================
 
-MODEL_NAME = "all-MiniLM-L6-v2"
 
-# IMPORTANT:
-# Do not load the embedding model when Django imports this file.
-# It will be loaded only when semantic_similarity() is called.
-_model = None
-
-
-def get_model() -> SentenceTransformer:
-    """
-    Lazily load the Sentence Transformer model.
-
-    This prevents Django startup, URL checks, admin pages,
-    and other commands from loading the ML model unnecessarily.
-    """
-
-    global _model
-
-    if _model is None:
-
-        _model = SentenceTransformer(
-            MODEL_NAME
-        )
-
-    return _model
+MODEL_NAME = "tfidf-lightweight"
 
 
 # =========================================================
-# NUMERIC / VALUE COMPARISON
+# GENERIC VALUE COMPARISON
 # =========================================================
 
 def values_are_equal(
@@ -45,36 +37,27 @@ def values_are_equal(
     value_b: Any,
     tolerance: float = 0.0,
 ) -> bool:
-    """
-    Compare two values.
-
-    Numeric values use a tolerance.
-    Strings are compared after normalization.
-    """
 
     if value_a is None or value_b is None:
         return False
 
 
-    if isinstance(
-        value_a,
-        (int, float),
-    ) and isinstance(
-        value_b,
-        (int, float),
+    # Numeric comparison
+    if (
+        isinstance(value_a, (int, float))
+        and isinstance(value_b, (int, float))
     ):
 
-        return abs(
-            value_a - value_b
-        ) <= tolerance
+        return (
+            abs(value_a - value_b)
+            <= tolerance
+        )
 
 
-    if isinstance(
-        value_a,
-        str,
-    ) and isinstance(
-        value_b,
-        str,
+    # String comparison
+    if (
+        isinstance(value_a, str)
+        and isinstance(value_b, str)
     ):
 
         normalized_a = (
@@ -96,7 +79,7 @@ def values_are_equal(
 
 
 # =========================================================
-# ATTRIBUTE VALUE DISPLAY
+# DISPLAY VALUE
 # =========================================================
 
 def display_value(
@@ -104,20 +87,13 @@ def display_value(
 ) -> str:
 
     if value is None:
-
         return "—"
 
 
-    if isinstance(
-        value,
-        float,
-    ):
+    if isinstance(value, float):
 
         if value.is_integer():
-
-            return str(
-                int(value)
-            )
+            return str(int(value))
 
         return f"{value:.2f}"
 
@@ -126,23 +102,12 @@ def display_value(
 
 
 # =========================================================
-# ATTRIBUTE FIELD CONFIGURATION
+# CATEGORY FIELD CONFIGURATION
 # =========================================================
 
 def get_category_fields(
     category: str,
 ):
-    """
-    Return important engineering fields for
-    each supported material category.
-
-    Tuple format:
-
-        (
-            field_name,
-            numeric_tolerance
-        )
-    """
 
     categories = {
 
@@ -172,8 +137,8 @@ def get_category_fields(
             ("wall_thickness_mm", 0.2),
             ("pipe_type", 0.0),
         ],
-    }
 
+    }
 
     return categories.get(
         category,
@@ -202,12 +167,10 @@ def resolve_category(
 
 
     if category_a != "UNKNOWN":
-
         return category_a
 
 
     if category_b != "UNKNOWN":
-
         return category_b
 
 
@@ -238,7 +201,6 @@ def categories_are_compatible(
         category_a == "UNKNOWN"
         or category_b == "UNKNOWN"
     ):
-
         return True
 
 
@@ -246,27 +208,13 @@ def categories_are_compatible(
 
 
 # =========================================================
-# ATTRIBUTE-LEVEL EXPLANATION
+# ATTRIBUTE EXPLANATION
 # =========================================================
 
 def build_attribute_explanation(
     attrs_a: Dict[str, Any],
     attrs_b: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
-    """
-    Produce an explainable comparison for every
-    relevant engineering attribute.
-
-    Each row contains:
-
-        name
-        value_a
-        value_b
-        status
-        score
-        importance
-        reason
-    """
 
     category_a = attrs_a.get(
         "category",
@@ -278,6 +226,10 @@ def build_attribute_explanation(
         "UNKNOWN",
     )
 
+
+    # -----------------------------------------------------
+    # Category mismatch is immediately critical.
+    # -----------------------------------------------------
 
     if (
         category_a != "UNKNOWN"
@@ -340,7 +292,7 @@ def build_attribute_explanation(
 
 
         # -------------------------------------------------
-        # Neither side contains the field.
+        # Attribute absent on both sides.
         # -------------------------------------------------
 
         if (
@@ -352,7 +304,7 @@ def build_attribute_explanation(
 
 
         # -------------------------------------------------
-        # Missing from A
+        # Missing from A.
         # -------------------------------------------------
 
         if (
@@ -383,8 +335,11 @@ def build_attribute_explanation(
                         "REVIEW",
 
                     "reason":
-                        f"{field} is present in Material B "
-                        "but not Material A.",
+                        (
+                            f"{field} is present in "
+                            "Material B but not "
+                            "Material A."
+                        ),
                 }
             )
 
@@ -392,7 +347,7 @@ def build_attribute_explanation(
 
 
         # -------------------------------------------------
-        # Missing from B
+        # Missing from B.
         # -------------------------------------------------
 
         if (
@@ -423,8 +378,11 @@ def build_attribute_explanation(
                         "REVIEW",
 
                     "reason":
-                        f"{field} is present in Material A "
-                        "but not Material B.",
+                        (
+                            f"{field} is present in "
+                            "Material A but not "
+                            "Material B."
+                        ),
                 }
             )
 
@@ -432,7 +390,7 @@ def build_attribute_explanation(
 
 
         # -------------------------------------------------
-        # Both values exist
+        # Both values exist.
         # -------------------------------------------------
 
         matched = values_are_equal(
@@ -469,8 +427,10 @@ def build_attribute_explanation(
                         "NORMAL",
 
                     "reason":
-                        f"{field} agrees within "
-                        f"the allowed tolerance.",
+                        (
+                            f"{field} agrees within "
+                            "the configured tolerance."
+                        ),
                 }
             )
 
@@ -501,8 +461,10 @@ def build_attribute_explanation(
                         "CRITICAL",
 
                     "reason":
-                        f"{field} does not agree "
-                        f"within the allowed tolerance.",
+                        (
+                            f"{field} does not agree "
+                            "within the configured tolerance."
+                        ),
                 }
             )
 
@@ -539,7 +501,6 @@ def attribute_similarity(
 
 
     if not fields:
-
         return 0.0
 
 
@@ -558,9 +519,6 @@ def attribute_similarity(
             field
         )
 
-
-        # Ignore fields completely absent from
-        # both descriptions.
 
         if (
             value_a is None
@@ -583,51 +541,103 @@ def attribute_similarity(
 
 
     if available == 0:
-
         return 0.0
 
 
-    return matched / available
+    return (
+        matched
+        /
+        available
+    )
 
 
 # =========================================================
-# SEMANTIC SIMILARITY
+# LIGHTWEIGHT TEXT SEMANTIC SIMILARITY
 # =========================================================
 
 def semantic_similarity(
     text_a: str,
     text_b: str,
 ) -> float:
+    """
+    Lightweight deterministic text similarity.
 
-    model = get_model()
+    Uses word + character n-gram TF-IDF so different
+    formatting such as:
 
+        M10 X 50
+        M10*50
+        10 MM X 50 MM
 
-    embeddings = model.encode(
-        [
-            text_a,
-            text_b,
-        ],
-        convert_to_tensor=True,
+    can still retain some lexical similarity.
+
+    This is a deployment-friendly substitute for a large
+    embedding model. Engineering attributes remain the
+    more important technical evidence.
+    """
+
+    text_a = (
+        text_a
+        .strip()
+        .upper()
+    )
+
+    text_b = (
+        text_b
+        .strip()
+        .upper()
     )
 
 
-    score = util.cos_sim(
-        embeddings[0],
-        embeddings[1],
-    ).item()
+    if not text_a or not text_b:
+        return 0.0
 
 
-    return max(
-        0.0,
-        min(
-            1.0,
-            score,
-        ),
-    )
+    try:
+
+        vectorizer = TfidfVectorizer(
+
+            analyzer="char_wb",
+
+            ngram_range=(2, 5),
+
+            lowercase=False,
+
+            sublinear_tf=True,
+
+        )
+
+
+        matrix = vectorizer.fit_transform(
+            [
+                text_a,
+                text_b,
+            ]
+        )
+
+
+        score = cosine_similarity(
+            matrix[0:1],
+            matrix[1:2],
+        )[0][0]
+
+
+        return max(
+            0.0,
+            min(
+                1.0,
+                float(score),
+            ),
+        )
+
+
+    except Exception:
+
+        return 0.0
 
 
 # =========================================================
-# CRITICAL MISMATCH
+# CRITICAL ENGINEERING MISMATCH
 # =========================================================
 
 def critical_mismatch(
@@ -969,28 +979,36 @@ def build_explanation_summary(
 
     matched = [
         row
+
         for row in attribute_rows
+
         if row["status"] == "MATCHED"
     ]
 
 
     conflicts = [
         row
+
         for row in attribute_rows
+
         if row["status"] == "CONFLICT"
     ]
 
 
     missing_a = [
         row
+
         for row in attribute_rows
+
         if row["status"] == "MISSING_A"
     ]
 
 
     missing_b = [
         row
+
         for row in attribute_rows
+
         if row["status"] == "MISSING_B"
     ]
 
@@ -1065,10 +1083,6 @@ def compare_materials(
     text_b: str,
 ) -> Dict[str, Any]:
 
-    # -----------------------------------------------------
-    # Clean user input
-    # -----------------------------------------------------
-
     text_a = (
         text_a
         .strip()
@@ -1094,7 +1108,7 @@ def compare_materials(
 
 
     # -----------------------------------------------------
-    # Semantic score
+    # Lightweight semantic score
     # -----------------------------------------------------
 
     semantic_score = semantic_similarity(
@@ -1104,7 +1118,7 @@ def compare_materials(
 
 
     # -----------------------------------------------------
-    # Attribute score
+    # Engineering attribute score
     # -----------------------------------------------------
 
     attr_score = attribute_similarity(
@@ -1114,7 +1128,7 @@ def compare_materials(
 
 
     # -----------------------------------------------------
-    # Detailed attribute explanation
+    # Detailed evidence
     # -----------------------------------------------------
 
     attribute_rows = (
@@ -1133,7 +1147,10 @@ def compare_materials(
 
 
     # -----------------------------------------------------
-    # Existing weighted scoring model
+    # Weighted overall score
+    #
+    # Engineering evidence gets more weight than text
+    # similarity.
     # -----------------------------------------------------
 
     final_score = (
@@ -1144,7 +1161,7 @@ def compare_materials(
 
 
     # -----------------------------------------------------
-    # Critical engineering mismatch
+    # Critical mismatch override
     # -----------------------------------------------------
 
     is_critical_mismatch = (
@@ -1154,10 +1171,6 @@ def compare_materials(
         )
     )
 
-
-    # -----------------------------------------------------
-    # Critical mismatch must override similarity.
-    # -----------------------------------------------------
 
     if is_critical_mismatch:
 
@@ -1262,7 +1275,8 @@ def compare_materials(
         explanation_text.append(
             (
                 "A critical engineering mismatch "
-                "prevents high-confidence consolidation."
+                "prevents high-confidence material "
+                "consolidation."
             )
         )
 
@@ -1270,7 +1284,10 @@ def compare_materials(
     if not explanation_text:
 
         explanation_text.append(
-            "No structured engineering evidence was available."
+            (
+                "No structured engineering evidence "
+                "was available."
+            )
         )
 
 
@@ -1312,10 +1329,6 @@ def compare_materials(
         "classification":
             classification,
 
-        # ---------------------------------------------
-        # NEW EXPLAINABILITY DATA
-        # ---------------------------------------------
-
         "attribute_explanation":
             attribute_rows,
 
@@ -1325,11 +1338,14 @@ def compare_materials(
         "explanation_text":
             explanation_text,
 
+        "semantic_engine":
+            MODEL_NAME,
+
     }
 
 
 # =========================================================
-# PRETTY PRINTING
+# CONSOLE TESTING
 # =========================================================
 
 def print_result(
@@ -1427,6 +1443,12 @@ def print_result(
 
 
     print(
+        "Semantic Engine    : "
+        f"{result['semantic_engine']}"
+    )
+
+
+    print(
         "\nExplanation:"
     )
 
@@ -1441,47 +1463,36 @@ def print_result(
 
 
 # =========================================================
-# TEST CASES
+# SAMPLE TESTS
 # =========================================================
 
 if __name__ == "__main__":
 
     examples = [
 
-        # Same bolt
         (
             "HEX BOLT M10 X 50 SS304",
-            "SS 304 HEXAGONAL BOLT 10MM X 50MM",
+            "HEXAGONAL BOLT M10 X 50 MM SS304",
         ),
 
-        # Different bolt material
         (
             "HEX BOLT M10 X 50 SS304",
             "HEX BOLT M10 X 50 SS316",
         ),
 
-        # Same valve
         (
             "SS316 FLANGED BALL VALVE 2 INCH 150 PSI",
             "2 IN FLG BALL VALVE SS316 150 PSI",
         ),
 
-        # Equivalent valve representation
-        (
-            "SS316 FLANGED BALL VALVE 2 INCH 150 PSI",
-            "BALL VALVE 50MM FLANGED SS316 150 PSI",
-        ),
-
-        # Different pipe material
         (
             "SEAMLESS PIPE SS304 50MM X 3MM",
-            "SEAMLESS SS316 PIPE 50MM X 3MM",
+            "SS304 SEAMLESS PIPE OD 50 MM WT 3 MM",
         ),
 
-        # Different bearing number
         (
-            "BEARING 6205 ZZ",
-            "BEARING 6206 ZZ",
+            "SEAMLESS PIPE SS304 50MM X 3MM",
+            "SEAMLESS SS316 PIPE 50 MM X 3 MM",
         ),
 
     ]

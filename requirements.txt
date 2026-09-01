@@ -7,5 +7,3 @@ numpy
 Pillow
 PyMuPDF
 gunicorn
-sentence-transformers[onnx]
-onnxruntime
